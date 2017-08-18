@@ -46,6 +46,7 @@ namespace Quobject.SocketIoClientDotNet.Client
         private int Attempts;
         private Uri Uri;
         private List<Parser.Packet> PacketBuffer;
+        private object subsLockObject = new object();
         private Queue<On.IHandle> Subs;
         private Quobject.EngineIoClientDotNet.Client.Socket.Options Opts;
         private bool AutoConnect;
@@ -220,7 +221,7 @@ namespace Quobject.SocketIoClientDotNet.Client
 
                 if (fn != null)
                 {
-                    var err = new SocketIOException("Connection error", data is Exception ? (Exception) data : null);
+                    var err = new SocketIOException("Connection error", data is Exception ? (Exception)data : null);
                     fn.Call(err);
                 }
                 MaybeReconnectOnOpen();
@@ -228,7 +229,7 @@ namespace Quobject.SocketIoClientDotNet.Client
 
             if (_timeout >= 0)
             {
-                var timeout = (int) _timeout;
+                var timeout = (int)_timeout;
                 log.Info(string.Format("connection attempt will timeout after {0}", timeout));
                 var timer = EasyTimer.SetTimeout(() =>
                 {
@@ -243,14 +244,19 @@ namespace Quobject.SocketIoClientDotNet.Client
                     log2.Info("Manager Open finish");
 
                 }, timeout);
+                lock (subsLockObject)
+                {
+                    Subs.Enqueue(new On.ActionHandleImpl(timer.Stop));
+                }
 
-                Subs.Enqueue(new On.ActionHandleImpl(timer.Stop));
-                ;
+
 
             }
-
-            Subs.Enqueue(openSub);
-            Subs.Enqueue(errorSub);
+            lock (subsLockObject)
+            {
+                Subs.Enqueue(openSub);
+                Subs.Enqueue(errorSub);
+            }
             EngineSocket.Open();
 
             return this;
@@ -279,25 +285,36 @@ namespace Quobject.SocketIoClientDotNet.Client
                     Ondata((byte[])data);
                 }
             }));
-            Subs.Enqueue(sub);
-
+            lock (subsLockObject)
+            {
+                Subs.Enqueue(sub);
+            }
             sub = Client.On.Create(this.Decoder, Parser.Parser.Decoder.EVENT_DECODED, new ListenerImpl((data) =>
             {
                 OnDecoded((Parser.Packet)data);
             }));
-            Subs.Enqueue(sub);
+            lock (subsLockObject)
+            {
+                Subs.Enqueue(sub);
+            }
 
             sub = Client.On.Create(socket, Engine.EVENT_ERROR, new ListenerImpl((data) =>
             {
-                OnError((Exception) data);
+                OnError((Exception)data);
             }));
-            Subs.Enqueue(sub);
+            lock (subsLockObject)
+            {
+                Subs.Enqueue(sub);
+            }
 
             sub = Client.On.Create(socket, Engine.EVENT_CLOSE, new ListenerImpl((data) =>
             {
-                OnClose((string) data);
+                OnClose((string)data);
             }));
-            Subs.Enqueue(sub);
+            lock (subsLockObject)
+            {
+                Subs.Enqueue(sub);
+            }
 
 
         }
@@ -331,7 +348,7 @@ namespace Quobject.SocketIoClientDotNet.Client
                 return Nsps[nsp];
             }
 
-            var socket = new Socket(this,nsp);
+            var socket = new Socket(this, nsp);
             Nsps = Nsps.Add(nsp, socket);
             socket.On(Client.Socket.EVENT_CONNECT, new ListenerImpl(() =>
             {
@@ -360,16 +377,16 @@ namespace Quobject.SocketIoClientDotNet.Client
                 Encoding = true;
                 Encoder.Encode(packet, new Parser.Parser.Encoder.CallbackImp((data) =>
                 {
-                    var encodedPackets = (object[]) data;
+                    var encodedPackets = (object[])data;
                     foreach (var packet1 in encodedPackets)
                     {
                         if (packet1 is string)
                         {
-                            EngineSocket.Write((string) packet1);
+                            EngineSocket.Write((string)packet1);
                         }
                         else if (packet1 is byte[])
                         {
-                            EngineSocket.Write((byte[]) packet1);
+                            EngineSocket.Write((byte[])packet1);
                         }
                     }
                     Encoding = false;
@@ -395,9 +412,12 @@ namespace Quobject.SocketIoClientDotNet.Client
 
         private void Cleanup()
         {
-            foreach (var sub in Subs)
+            lock (subsLockObject)
             {
-                sub.Destroy();
+                foreach (var sub in Subs)
+                {
+                    sub.Destroy();
+                }
             }
         }
 
@@ -441,7 +461,7 @@ namespace Quobject.SocketIoClientDotNet.Client
             }
             else
             {
-                var delay = Attempts*ReconnectionDelay();
+                var delay = Attempts * ReconnectionDelay();
                 delay = Math.Min(delay, ReconnectionDelayMax());
                 log.Info(string.Format("will wait {0}ms before reconnect attempt", delay));
 
@@ -457,10 +477,10 @@ namespace Quobject.SocketIoClientDotNet.Client
                     {
                         if (err != null)
                         {
-                            log.Error("reconnect attempt error", (Exception) err);
+                            log.Error("reconnect attempt error", (Exception)err);
                             Reconnecting = false;
                             Reconnect();
-                            EmitAll(EVENT_RECONNECT_ERROR, (Exception) err);
+                            EmitAll(EVENT_RECONNECT_ERROR, (Exception)err);
                         }
                         else
                         {
@@ -470,8 +490,10 @@ namespace Quobject.SocketIoClientDotNet.Client
                     }));
                     log2.Info("EasyTimer Reconnect finish");
                 }, (int)delay);
-
-                Subs.Enqueue(new On.ActionHandleImpl(timer.Stop));                
+                lock (subsLockObject)
+                {
+                    Subs.Enqueue(new On.ActionHandleImpl(timer.Stop));
+                }
             }
         }
 

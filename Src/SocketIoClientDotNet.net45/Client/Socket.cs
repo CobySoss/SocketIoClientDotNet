@@ -45,6 +45,8 @@ namespace Quobject.SocketIoClientDotNet.Client
         private string Nsp;
         private Manager _io;
         private ImmutableDictionary<int, IAck> Acks = ImmutableDictionary.Create<int, IAck>();
+        private object subsLockObject = new object();
+        private object idsLockObject = new object();
         private ImmutableQueue<On.IHandle> Subs;
         private ImmutableQueue<List<object>> ReceiveBuffer = ImmutableQueue.Create<List<object>>();
         private ImmutableQueue<Parser.Packet> SendBuffer = ImmutableQueue.Create<Parser.Packet>();
@@ -59,10 +61,13 @@ namespace Quobject.SocketIoClientDotNet.Client
         private void SubEvents()
         {
             Manager io = _io;
-            Subs = ImmutableQueue.Create<On.IHandle>();
-            Subs = Subs.Enqueue(Client.On.Create(io, Manager.EVENT_OPEN, new ListenerImpl(OnOpen)));
-            Subs = Subs.Enqueue(Client.On.Create(io, Manager.EVENT_PACKET, new ListenerImpl((data) => OnPacket((Packet)data))));
-            Subs = Subs.Enqueue(Client.On.Create(io, Manager.EVENT_CLOSE, new ListenerImpl((data) => OnClose((string)data))));
+            lock (subsLockObject)
+            {
+                Subs = ImmutableQueue.Create<On.IHandle>();
+                Subs = Subs.Enqueue(Client.On.Create(io, Manager.EVENT_OPEN, new ListenerImpl(OnOpen)));
+                Subs = Subs.Enqueue(Client.On.Create(io, Manager.EVENT_PACKET, new ListenerImpl((data) => OnPacket((Packet)data))));
+                Subs = Subs.Enqueue(Client.On.Create(io, Manager.EVENT_CLOSE, new ListenerImpl((data) => OnClose((string)data))));
+            }
         }
 
 
@@ -104,7 +109,7 @@ namespace Quobject.SocketIoClientDotNet.Client
                 return this;
             }
 
-            var _args = new List<object> {eventString};
+            var _args = new List<object> { eventString };
             _args.AddRange(args);
 
             var jsonArgs = Parser.Packet.Args2JArray(_args);
@@ -115,11 +120,15 @@ namespace Quobject.SocketIoClientDotNet.Client
             var lastArg = _args[_args.Count - 1];
             if (lastArg is IAck)
             {
-                log.Info(string.Format("emitting packet with ack id {0}", Ids));
-                Acks = Acks.Add(Ids, (IAck)lastArg);
+                lock(idsLockObject)
+                {
+                    packet.Id = Ids;
+                    Ids++;
+                    Acks = Acks.Add(packet.Id, (IAck)lastArg);
+                }
+                log.Info(string.Format("emitting packet with ack id {0}", packet.Id));
                 jsonArgs = Parser.Packet.Remove(jsonArgs, jsonArgs.Count - 1);
                 packet.Data = jsonArgs;
-                packet.Id = Ids++;
             }
 
             if (Connected)
@@ -133,7 +142,7 @@ namespace Quobject.SocketIoClientDotNet.Client
             return this;
         }
 
- 
+
         public Emitter Emit(string eventString, IAck ack, params object[] args)
         {
             var log = LogManager.GetLogger(Global.CallerName());
@@ -141,16 +150,18 @@ namespace Quobject.SocketIoClientDotNet.Client
             var _args = new List<object> { eventString };
             if (args != null)
             {
-                _args.AddRange(args);                
+                _args.AddRange(args);
             }
 
             var jarray = new JArray(_args);
             var packet = new Packet(Parser.Parser.EVENT, jarray);
-
-            log.Info(string.Format("emitting packet with ack id {0}", Ids));
-            Acks = Acks.Add(Ids, ack);
-            packet.Id = Ids++;
-
+            lock(idsLockObject)
+            {
+                packet.Id = Ids;
+                Ids++;
+                Acks = Acks.Add(packet.Id, ack);
+            }
+            log.Info(string.Format("emitting packet with ack id {0}", packet.Id));
             Packet(packet);
             return this;
         }
@@ -233,7 +244,7 @@ namespace Quobject.SocketIoClientDotNet.Client
             }
         }
 
- 
+
         private void OnEvent(Packet packet)
         {
             var log = LogManager.GetLogger(Global.CallerName());
@@ -257,7 +268,7 @@ namespace Quobject.SocketIoClientDotNet.Client
 
             if (Connected)
             {
-                var eventString = (string) args[0];
+                var eventString = (string)args[0];
                 args.Remove(args[0]);
                 base.Emit(eventString, args.ToArray());
             }
@@ -265,16 +276,16 @@ namespace Quobject.SocketIoClientDotNet.Client
             {
                 ReceiveBuffer = ReceiveBuffer.Enqueue(args);
             }
-        }  
+        }
 
         private class AckImp : IAck
         {
             private Socket socket;
             private int Id;
-            private readonly bool[] sent = new[] {false};
+            private readonly bool[] sent = new[] { false };
 
             public AckImp(Socket socket, int id)
-            {                
+            {
                 this.socket = socket;
                 this.Id = id;
             }
@@ -302,14 +313,13 @@ namespace Quobject.SocketIoClientDotNet.Client
             var log = LogManager.GetLogger(Global.CallerName());
             log.Info(string.Format("calling ack {0} with {1}", packet.Id, packet.Data));
             var fn = Acks[packet.Id];
-            Acks = Acks.Remove(packet.Id);
-
+            lock(idsLockObject)
+            {
+                Acks = Acks.Remove(packet.Id);
+            }
             var args = packet.GetDataAsList();
-
             fn.Call(args.ToArray());
         }
-
-
 
         private void OnConnect()
         {
@@ -325,12 +335,12 @@ namespace Quobject.SocketIoClientDotNet.Client
             {
                 List<object> data;
                 ReceiveBuffer = ReceiveBuffer.Dequeue(out data);
-                var eventString = (string) data[0];
+                var eventString = (string)data[0];
                 base.Emit(eventString, data.ToArray());
             }
             ReceiveBuffer = ReceiveBuffer.Clear();
 
-           
+
             while (SendBuffer.Count() > 0)
             {
                 Packet packet;
@@ -351,12 +361,14 @@ namespace Quobject.SocketIoClientDotNet.Client
 
         private void Destroy()
         {
-            foreach (var sub in Subs)
+            lock (subsLockObject)
             {
-                sub.Destroy();
+                foreach (var sub in Subs)
+                {
+                    sub.Destroy();
+                }
+                Subs = Subs.Clear();
             }
-            Subs = Subs.Clear();
-
             _io.Destroy(this);
         }
 
